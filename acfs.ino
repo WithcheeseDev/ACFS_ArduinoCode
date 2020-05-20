@@ -55,9 +55,14 @@ int previous_sensor_work_freq = 0;
 int feeder_config_freq = 15;
 int previous_feeder_work_freq = 0;
 int prevBoardConfigUpdateTime = 0;
-int boardConfigUpdateFreq = 5 * 60;
-int sensorWorkingFreq = 5 ;
+int prevSensorWorkingTime = 0;
+int boardConfigUpdateFreq = 1 * 60;
+int sensorWorkingFreq = 5 * 60 ;
 String feedSchedule;
+String scheduleList[10];
+int totalSchedule = 0;
+int beginSubstringIndex = 0;
+int scheduleListIndex = 0;
 
 // ---------- DATETIME ---------- //
 String datetime; // DATETIME .
@@ -212,24 +217,31 @@ void loop()
     row_values *row = NULL;
     delay(100);
 
-    datetimeManager(true);
+    datetimeManager(false);
 
-    isUserRegister(cur_mem, row);
+    if (!isAcfsUserRegister) {
+      isUserRegister(cur_mem, row);
+    }
 
     if (!isAcfsBoardRegister) {
       isBoardRegister(cur_mem, row);
     }
 
     if (latest_time - prevBoardConfigUpdateTime >= boardConfigUpdateFreq * period) {
-      getBoardConfig(cur_mem, row);
+      loadBoardConfig(cur_mem, row);
+      prevBoardConfigUpdateTime = latest_time;
     }
 
     if (isAcfsUserRegister == true && isAcfsBoardRegister == true) {
-      calcualateTempValue();
-      calculateAvgPhValue();
-      recordSensorValue(cur_mem, row, temp_val, ph_val);
+      if (latest_time - prevSensorWorkingTime >= sensorWorkingFreq * period) {
+        calcualateTempValue();
+        calculateAvgPhValue();
+        recordSensorValue(cur_mem, row, temp_val, ph_val);
+        prevSensorWorkingTime = latest_time;
+      }
     }
 
+    delete cur_mem;
     previous_time = millis();
   }
 }
@@ -248,9 +260,9 @@ void datetimeManager(bool isPrint) {
   time_now = datetime.substring(splitTindex + 1, splitZindex); // SPLIT DATETIME TO GET TIME .
   hour_now = timeClient.getHours();
   min_now = timeClient.getMinutes();
+  sprintf(timestamp, "%s %s", date_now, time_now); // FORMATTING timestamp .
 
   if (isPrint) {
-    sprintf(timestamp, "%s %s", date_now, time_now); // FORMATTING timestamp .
     Serial.print("\nTIMESTAMP : ");
     Serial.println(timestamp);
     Serial.print("HOUR | MIN : ");
@@ -272,12 +284,20 @@ void insertSQL(float temp_val, float ph_val) {
 
 void recordSensorValue(MySQL_Cursor *cur_mem, row_values *row, float tempValue, float phValue) {
 
-  char* recordSensorValueSql = "INSERT INTO acfs_beta.board_log (temp_value, ph_value, board_id, u_id, created_at) VALUES (%.2f, %.2f, '%s', '%s', '%s');";
+  Serial.println("---------- RECORD SENSOR VALUE ----------");
+  Serial.print("WATER TEMP : ");
+  Serial.println(temp_val);
+  Serial.print("PH : ");
+  Serial.println(ph_val);
+  Serial.print("BOARD ID : ");
+  Serial.println(macAddr16Bit);
+  //  char* recordSensorValueSql = "INSERT INTO acfs_beta.board_log (temp_value, ph_value, board_id, u_id, created_at) VALUES (%.2f, %.2f, '%s', '%s', '%s');";
+  char* recordSensorValueSql = "CALL acfs_beta.store_sensor_data(%.2f, %.2f, '%s', '%s', '%s');";
   sprintf(query, recordSensorValueSql, tempValue, phValue, macAddr16Bit, acfsUserID, timestamp);
 
   // Execute sql
   cur_mem->execute(query);
-  delay(100);
+  delay(500);
 }
 
 // ---------- SELECT SQL FUNCTION ---------- //
@@ -286,10 +306,13 @@ void getBoardID(String board_id) {
   sprintf(query, sql, board_id);
 }
 
-void getBoardConfig(MySQL_Cursor *cur_mem, row_values *row) {
+void loadBoardConfig(MySQL_Cursor *cur_mem, row_values *row) {
 
-  char getBoardConfigSql[] = "SELECT * FROM acfs_beta.board_config WHERE board_id = '%s';";
-  sprintf(query, getBoardConfigSql, macAddr16Bit);
+  // load board config here !!
+  
+  Serial.println("---------- GET BOARD CONFIG ----------");
+  char loadBoardConfigSql[] = "SELECT * FROM acfs_beta.board_config WHERE board_id = '%s';";
+  sprintf(query, loadBoardConfigSql, macAddr16Bit);
 
   // Execute sql
   cur_mem->execute(query);
@@ -306,11 +329,11 @@ void getBoardConfig(MySQL_Cursor *cur_mem, row_values *row) {
     if (row != NULL) {
       for (int f = 0; f < cols->num_fields; f++) {
         switch (f) {
-          case 0 : {
-              sensorWorkingFreq = (int)(row -> values[f]);
+          case 1 : {
+              sensorWorkingFreq = atoi(row -> values[f]) * 60;
               break;
             }
-          case 1 : {
+          case 2 : {
               feedSchedule = row -> values[f];
               break;
             }
@@ -322,6 +345,21 @@ void getBoardConfig(MySQL_Cursor *cur_mem, row_values *row) {
       } Serial.println();
     }
   } while (row != NULL);
+
+  Serial.print("SENSOR WORKING FREQ : ");
+  Serial.print(sensorWorkingFreq / 60);
+  Serial.println(" Minutes");
+  Serial.print("FEED SCHEDULE : ");
+  Serial.println(feedSchedule);
+
+  Serial.print("Fedd schedule index 1 : ");
+  for(int strIdx = 0; strIdx < feedSchedule.length(); strIdx++)
+  {
+    if(feedSchedule.charAt(strIdx) == ','){
+      Serial.print("Founded delimiter");
+    }
+  }
+  Serial.println();
 
   prevBoardConfigUpdateTime = latest_time; // _Update board config time to latest
   delay(100);
@@ -365,11 +403,17 @@ void isBoardRegister(MySQL_Cursor *cur_mem, row_values *row) {
 
   if (isAcfsBoardRegister) {
     Serial.println("Board already registered\n");
+    delay(100);
   } else {
     Serial.print("Register board number : ");
     Serial.println(macAddr16Bit);
     char* registerAcfsBoardSql = "INSERT INTO acfs_beta.board_info VALUES ('%s', '%s', '%s');";
+    char* updateAcfsBoardConfigSql = "INSERT INTO acfs_beta.board_config VALUES ('%s', %d, '%s', '%s', '%s')";
     sprintf(query, registerAcfsBoardSql, macAddr16Bit, acfsUserID, timestamp);
+    cur_mem->execute(query);
+    delay(500);
+    Serial.println("UPDATE BOARD CONFIG");
+    sprintf(query, updateAcfsBoardConfigSql, macAddr16Bit, 5, "00:00:00", timestamp, timestamp);
     cur_mem->execute(query);
   }
   delay(100);
@@ -378,6 +422,7 @@ void isBoardRegister(MySQL_Cursor *cur_mem, row_values *row) {
 // _Check exist user : don't start main function if don't found user account
 void isUserRegister(MySQL_Cursor *cur_mem, row_values *row) {
 
+  Serial.println("---------- CHECK EXIST USER ----------");
   bool userRegisterState = false;
   char getAcfsUserSql[] = "SELECT * FROM acfs_beta.user_info WHERE u_id = '%s';";
   sprintf(query, getAcfsUserSql, acfsUserID);
@@ -406,10 +451,11 @@ void isUserRegister(MySQL_Cursor *cur_mem, row_values *row) {
       } Serial.println();
     }
   } while (row != NULL);
-  if (isAcfsUserRegister == true) {
-    Serial.println("User already registered\n");
-  } else
+  if (!isAcfsUserRegister) {
+    //    Serial.println("User already registered\n");
     Serial.println("User didn't register\n");
+  }
+
   delay(100);
 }
 
